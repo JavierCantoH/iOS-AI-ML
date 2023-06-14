@@ -1,14 +1,14 @@
 //
-//  ViewController.swift
+//  PredictionsApi.swift
 //  AppML
 //
 //  Created by Luis Javier Canto Hurtado on 04/05/23.
 //
 
 import UIKit
-import Vision
+import Alamofire
 
-class ViewController: UIViewController {
+class PredictionsApi: UIViewController {
     
     private lazy var digitLabel: UILabel = {
         let label = UILabel()
@@ -21,7 +21,7 @@ class ViewController: UIViewController {
         label.font = .systemFont(ofSize: 80, weight: .bold)
         label.textAlignment = .center
         label.textColor = .black
-        label.text = "0"
+        label.text = ""
         return label
     }()
     
@@ -52,11 +52,8 @@ class ViewController: UIViewController {
         return button
     }()
     
-    private var requests = [VNRequest]() // holds Image Classification Request
-    
     override func viewDidLoad() {
         super.viewDidLoad()
-        setupVision()
         view.backgroundColor = .white
         view.addSubview(digitLabel)
         view.addSubview(canvasView)
@@ -85,43 +82,53 @@ class ViewController: UIViewController {
             recognizeButton.widthAnchor.constraint(equalToConstant: 100),
         ])
     }
-
-    private func setupVision() {
-        // load MNIST model for the use with the Vision framework
-        guard let visionModel = try? VNCoreMLModel(for: MNIST().model) else {fatalError("can not load Vision ML model")}
-        // create a classification request and tell it to call handleClassification once its done
-        let classificationRequest = VNCoreMLRequest(model: visionModel, completionHandler: self.handleClassification)
-        self.requests = [classificationRequest] // assigns the classificationRequest to the global requests array
-    }
-    
-    private func handleClassification(request: VNRequest, error: Error?) {
-        guard let observations = request.results else { return }
-        // process the ovservations
-        let classifications = observations
-            .compactMap({$0 as? VNClassificationObservation}) // cast all elements to VNClassificationObservation objects
-            .filter({$0.confidence > 0.8}) // only choose observations with a confidence of more than 80%
-            .map({$0.identifier}) // only choose the identifier string to be placed into the classifications array
-        print("observations: \(observations)")
-        DispatchQueue.main.async {
-            self.digitLabel.text = classifications.first // update the UI with the classification
-        }
-    }
     
     @objc private func clearCanvas() {
         canvasView.clearCanvas()
+        digitLabel.text = ""
     }
     
     @objc private func recognizeDigit() {
         let image = UIImage(view: canvasView) // get UIImage from CanvasView
         // scale the image to the required size of 28x28 for better recognition results
         let scaledImage = scaleImage(image: image, toSize: CGSize(width: 28, height: 28))
-        // create a handler that should perform the vision request
-        let imageRequestHandler = VNImageRequestHandler(cgImage: scaledImage.cgImage!, options: [:])
-        do {
-            try imageRequestHandler.perform(self.requests)
-        } catch {
-            print(error)
+        
+        guard let imageData = scaledImage.pngData() else {
+            print("Error al convertir la imagen en datos PNG")
+            return
         }
+        
+        let pixelData = imageData.pixelData() // Obtener datos de píxeles de la imagen
+        
+        let flattenedPixelData = pixelData.compactMap { $0 } // Aplanar los valores de píxeles en una sola matriz
+        
+        var reshapedPixelData = Array(repeating: Float(0.0), count: 784) // Crear una matriz de tamaño 784 rellenada con ceros
+        
+        for (index, value) in flattenedPixelData.enumerated() {
+            reshapedPixelData[index] = Float(value)
+        }
+        
+        let parameters = [
+            "instances": [[reshapedPixelData]]
+        ]
+        
+        AF.request("https://linear-model-service-javiercantoh.cloud.okteto.net/v1/models/linear-model:predict", method: .post, parameters: parameters, encoding: JSONEncoding.default, headers: nil)
+            .validate()
+            .responseDecodable(of: ImageResponse.self) { response in
+                switch response.result {
+                case .success(let value):
+                    let predictedClass = value.predictions[0].enumerated().max(by: { $0.element < $1.element })?.offset
+                    print("predictions: \(value.predictions[0])")
+                    if let predictedClass = predictedClass {
+                        self.digitLabel.text = "\(predictedClass)"
+                    } else {
+                        self.digitLabel.text = "Failed"
+                    }
+                case .failure(let error):
+                    print("API request error: \(error)")
+                    self.digitLabel.text = "API error"
+                }
+            }
     }
     
     // scales any UIImage to a desired target size
@@ -132,4 +139,25 @@ class ViewController: UIViewController {
         UIGraphicsEndImageContext()
         return newImage!
     }
+}
+
+// Función para obtener los datos de píxeles de la imagen
+private extension Data {
+    func pixelData() -> [Float] {
+        var pixelData: [Float] = []
+        self.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) -> Void in
+            let pointer = bytes.baseAddress?.assumingMemoryBound(to: UInt8.self)
+            let pixelBuffer = UnsafeBufferPointer(start: pointer, count: self.count)
+            
+            for pixel in pixelBuffer {
+                let pixelValue = Float(pixel) / 255.0
+                pixelData.append(pixelValue)
+            }
+        }
+        return pixelData
+    }
+}
+
+struct ImageResponse: Codable {
+    let predictions: [[Float]]
 }
